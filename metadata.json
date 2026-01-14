@@ -1,0 +1,5 @@
+{
+  "name": "PDF Invoice Extractor",
+  "description": "An intelligent tool to extract tabular data from PDF invoices using Gemini AI. Upload a PDF, and the application will perform OCR to extract invoice details and line items, presenting them in an Excel-like format that can be exported to CSV.",
+  "requestFramePermissions": []
+}
